@@ -44,10 +44,15 @@
                 <TextBlock>Locked To:</TextBlock>
                 <TextBlock x:Name="LockName"></TextBlock>
             </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <TextBlock>Translate MouseWheel to LeftClick: </TextBlock>
+                <TextBlock x:Name="FlagTranslateMouseWheelToLeftClick"></TextBlock>
+            </StackPanel>
         </StackPanel>
         <StackPanel Grid.Row="3">
             <TextBlock>CTRL + ALT + NumPlus = Lock to current screen</TextBlock>
             <TextBlock>CTRL + ALT + NumMinus = Unlock</TextBlock>
+            <TextBlock>CTRL + ALT + Num8 = Toggle Translate MouseWheel to LeftClick</TextBlock>
         </StackPanel>
     </Grid>
 

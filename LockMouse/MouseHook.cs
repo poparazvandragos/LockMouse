@@ -1,15 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace LockMouse
 {
-    public class MouseHook
+    public class MouseHook : IDisposable
     {
 
         #region Constants
@@ -67,7 +69,8 @@ namespace LockMouse
             public uint dwExtraInfo;
         }
 
-        public static System.Drawing.Point lastMousePosition;
+        private Screen[] screens;
+        private ShellViewModel shellViewModel;
 
         public delegate int HookProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -82,34 +85,189 @@ namespace LockMouse
 
         [DllImport("User32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
         public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+        //DLLImport for GetLastError
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int GetLastError();
 
         static int hHook = 0;
         static HookProc MouseLLProcedure;
+        private DateTime lastTime = DateTime.Now;
         #endregion
 
-        public static int MouseLLProc(int nCode, IntPtr wParam, IntPtr lParam)
+        public int MouseLLProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if ((nCode >= 0))
             {
                 MSLLHOOKSTRUCT pMSLLHOOKSTRUCT = new MSLLHOOKSTRUCT();
                 pMSLLHOOKSTRUCT = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, pMSLLHOOKSTRUCT.GetType());
-                if (lastMousePosition.X != pMSLLHOOKSTRUCT.pt.X &&
-                    lastMousePosition.Y != pMSLLHOOKSTRUCT.pt.Y)
+                int wParamInt = wParam.ToInt32();
+
+                if (wParamInt == WM_MOUSEMOVE)
+                    if (ShellViewModel.lastMousePosition.X != pMSLLHOOKSTRUCT.pt.X &&
+                        ShellViewModel.lastMousePosition.Y != pMSLLHOOKSTRUCT.pt.Y)
+                    {
+                        MouseMove?.Invoke(this, new MouseMoveEventArgs(pMSLLHOOKSTRUCT.pt));
+                        HandleMouseMove(pMSLLHOOKSTRUCT.pt);
+                        ShellViewModel.lastMousePosition.X = pMSLLHOOKSTRUCT.pt.X;
+                        ShellViewModel.lastMousePosition.Y = pMSLLHOOKSTRUCT.pt.Y;
+                    }
+
+                if (wParamInt != WM_MOUSEMOVE && wParamInt != WM_LBUTTONDOWN && wParamInt != WM_LBUTTONUP)
                 {
-                    MouseMove?.Invoke(null, pMSLLHOOKSTRUCT.pt);
-                    //ShellViewModel.LockMouse(pMSLLHOOKSTRUCT.pt);
-                    lastMousePosition.X = pMSLLHOOKSTRUCT.pt.X;
-                    lastMousePosition.Y = pMSLLHOOKSTRUCT.pt.Y;
+                    HandleMouse(wParamInt, pMSLLHOOKSTRUCT);
                 }
             }
+
+
             return nCode < 0 ? CallNextHookEx(hHook, nCode, wParam, lParam) : 0;
         }
+        private void HandleMouseMove(System.Drawing.Point position)
+        {
+            var scr = shellViewModel.GetCurrentScreen(position);
+            shellViewModel.Screen = scr.DeviceName;
+            shellViewModel.PointX = position.X;
+            shellViewModel.PointY = position.Y;
+            var screenPosition = shellViewModel.GetPositionInScreenSpace(position, scr);
+            shellViewModel.ScreenX = screenPosition.X;
+            shellViewModel.ScreenY = screenPosition.Y;
+        }
 
-        internal static void SendMouseEvent(int param, MSLLHOOKSTRUCT pMSLLHOOKSTRUCT)
+        int mouseInputThreads = 0;
+
+        private void HandleMouse(int wParamInt, MSLLHOOKSTRUCT pMSLLHOOKSTRUCT)
+        {
+            //Trace.WriteLine("Mouse wParamInt: " + wParamInt);
+            //Trace.WriteLine("Mouse pMSLLHOOKSTRUCT.pt.X: " + pMSLLHOOKSTRUCT.pt.X);
+            //Trace.WriteLine("Mouse pMSLLHOOKSTRUCT.pt.Y: " + pMSLLHOOKSTRUCT.pt.Y);
+            //Trace.WriteLine("Mouse pMSLLHOOKSTRUCT.mouseData: " + pMSLLHOOKSTRUCT.mouseData);
+            //Trace.WriteLine("Mouse pMSLLHOOKSTRUCT.flags: " + pMSLLHOOKSTRUCT.flags);
+
+            //wParamInt WM_MOUSEWHEEL mouse wheel
+            //pMSLLHOOKSTRUCT.mouseData > 0 = wheel up
+            //pMSLLHOOKSTRUCT.mouseData < 0 = wheel down
+
+            if (shellViewModel.FlagTranslateMouseWheelToLeftClick)
+            {
+                if (wParamInt == WM_MOUSEWHEEL)
+                {
+                    if (pMSLLHOOKSTRUCT.mouseData != 0)
+                    {
+                        var currentTime = DateTime.Now;
+                        if (currentTime - lastTime < TimeSpan.FromMilliseconds(50))
+                        {
+                            return;
+                        }
+                        mouseInputThreads++;
+                        //Create a new thread to send the mouse click
+                        if (mouseInputThreads > 10)
+                        {
+                            Trace.WriteLine("Too many mouse input threads: " + mouseInputThreads);
+                            return;
+                        }
+
+                        Thread thread = new Thread(() =>
+                        {
+                            SendMouseInput(MOUSEEVENTF_LEFTDOWN, pMSLLHOOKSTRUCT);
+                            Thread.Sleep(10);
+                            SendMouseInput(MOUSEEVENTF_LEFTUP, pMSLLHOOKSTRUCT);
+
+                            //SendMouseClick(pMSLLHOOKSTRUCT);
+                            lastTime = currentTime;
+                            mouseInputThreads--;
+                        });
+                        thread.Start();
+                    }
+                }
+            }
+
+            //wParamInt WM_XBUTTONDOWN / WM_XBUTTONUP
+            //pMSLLHOOKSTRUCT.mouseData 131072 = side top button
+            //pMSLLHOOKSTRUCT.mouseData 65536 = side bottom button
+        }
+
+        //define INPUT struct
+        [StructLayout(LayoutKind.Sequential)]
+        public struct INPUT
+        {
+            public int type;
+            public MOUSEINPUT mi;
+        }
+        //define MOUSEINPUT struct
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MOUSEINPUT
+        {
+            public int dx;
+            public int dy;
+            public int mouseData;
+            public int dwFlags;
+            public int time;
+            public IntPtr dwExtraInfo;
+        }
+
+        //define INPUT type
+        const int INPUT_MOUSE = 0;
+        const int INPUT_KEYBOARD = 1;
+        const int INPUT_HARDWARE = 2;
+
+        //define mouse event type
+        const int MOUSEEVENTF_LEFTDOWN = 0x02;
+        const int MOUSEEVENTF_LEFTUP = 0x04;
+
+        //import SendInput function
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        internal static void SendMouseInput(int param, MSLLHOOKSTRUCT pMSLLHOOKSTRUCT)
         {
             //send mouse input to system
-            SendMessage(IntPtr.Zero, param, 0, MAKELPARAM(pMSLLHOOKSTRUCT.pt.X, pMSLLHOOKSTRUCT.pt.Y));
+            //var lParam = MAKELPARAM(pMSLLHOOKSTRUCT.pt.X, pMSLLHOOKSTRUCT.pt.Y);
+            //Trace.WriteLine("SendMouseEvent: " + param + " " + lParam); 
+            //var result = SendMessage(IntPtr.Zero, param, 0, lParam);
 
+            //use SendInput instead of SendMessage
+            INPUT[] inputs = new INPUT[1];
+            inputs[0].type = INPUT_MOUSE;
+            inputs[0].mi.dx = pMSLLHOOKSTRUCT.pt.X;
+            inputs[0].mi.dy = pMSLLHOOKSTRUCT.pt.Y;
+            inputs[0].mi.dwFlags = param;
+
+            var result = SendInput(1, inputs, Marshal.SizeOf(inputs[0]));
+
+            if (result == 0)
+            {
+                Trace.WriteLine("SendMouseEvent error: " + GetLastError());
+            }
+        }
+
+        internal static void SendMouseClick(MSLLHOOKSTRUCT pMSLLHOOKSTRUCT)
+        {
+            //send mouse input to system
+            //var lParam = MAKELPARAM(pMSLLHOOKSTRUCT.pt.X, pMSLLHOOKSTRUCT.pt.Y);
+            //Trace.WriteLine("SendMouseEvent: " + param + " " + lParam); 
+            //var result = SendMessage(IntPtr.Zero, param, 0, lParam);
+
+            //use SendInput instead of SendMessage
+            INPUT[] inputs = new INPUT[2];
+            inputs[0].type = INPUT_MOUSE;
+            inputs[0].mi.dx = pMSLLHOOKSTRUCT.pt.X;
+            inputs[0].mi.dy = pMSLLHOOKSTRUCT.pt.Y;
+            inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+
+            inputs[1].type = INPUT_MOUSE;
+            inputs[1].mi.dx = pMSLLHOOKSTRUCT.pt.X;
+            inputs[1].mi.dy = pMSLLHOOKSTRUCT.pt.Y;
+            inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+
+            var result = SendInput(2, inputs, Marshal.SizeOf(inputs[0]));
+
+            if (result == 0)
+            {
+                Trace.WriteLine("SendMouseClick error: " + GetLastError());
+            }
+            else
+            {
+                Trace.WriteLine("SendMouseClick result: " + result);
+            }
         }
 
         private static int MAKELPARAM(int x, int y)
@@ -117,14 +275,21 @@ namespace LockMouse
             return ((y << 16) | (x & 0xFFFF));
         }
 
-        public static event EventHandler<Point> MouseMove;
+        public static event EventHandler<MouseMoveEventArgs> MouseMove;
 
-        public MouseHook()
+        public MouseHook(ShellViewModel shellViewModel, Screen[] screens)
         {
-            lastMousePosition = new Point();
+            this.screens = screens;
+            this.shellViewModel = shellViewModel;
             MouseLLProcedure = new HookProc(MouseLLProc);
             hHook = SetWindowsHookEx(WH_MOUSE_LL, MouseLLProcedure, (IntPtr)0, 0);
+        }
 
+        public void Dispose()
+        {
+            //unhook the mouse hook
+            UnhookWindowsHookEx(hHook);
+            Trace.WriteLine("MouseHook disposed");
         }
     }
 }

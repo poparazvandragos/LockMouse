@@ -106,6 +106,7 @@
     <Compile Include="EnumLockState.cs" />
     <Compile Include="IShell.cs" />
     <Compile Include="MouseHook.cs" />
+    <Compile Include="MouseMoveEventArgs.cs" />
     <Compile Include="MouseUtils.cs" />
     <Compile Include="ShellViewModel.cs" />
     <Page Include="MainWindow.xaml">
